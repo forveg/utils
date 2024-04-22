@@ -144,8 +144,22 @@ def add_features(df: pd.DataFrame, **kw) -> pd.DataFrame:
     
     return df
 
-def tsfresh_extract(df: pd.DataFrame, window: int, column: str) -> pd.DataFrame:
+def tsfresh_extract(df: pd.DataFrame, 
+                    window: int, 
+                    column: str,
+                    show_warnings=False) -> pd.DataFrame:
     """Extracts tsfresh features, based on the column `column` and window size `window`
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Source dataframe
+    window : int
+        Window size to aggregate over
+    column : str
+        Column to extract features from
+    show_warnings : bool (default False)
+        Whether tsfresh should display warnings
     """
     df_tmp = ( df
               .loc[:, [column]]
@@ -157,7 +171,7 @@ def tsfresh_extract(df: pd.DataFrame, window: int, column: str) -> pd.DataFrame:
                               rolling_direction=1, 
                               max_timeshift=window-1, 
                               min_timeshift=window-1,
-                              show_warnings=True,
+                              show_warnings=show_warnings,
                               n_jobs=4)
     feats = extract_features(rolled.drop(columns=['dummy_id']),
                              column_id="id", 
