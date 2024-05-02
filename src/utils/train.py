@@ -148,6 +148,21 @@ def get_Xy(df: pd.DataFrame,
     
     return X, y  
 
+def make_callback(X_eval, y_eval,
+                  X_test, y_test,
+                  eval_metrics: list,
+                  test_metrics: list,
+                  metrics: dict[str, Callable],
+                  log_freq=10):
+    
+    def eval_callback(env):
+        if env.iteration%log_freq==0:
+            eval_metrics.append(
+                evaluate(y_eval, env.model.predict(X_eval), metrics))
+            test_metrics.append(
+                evaluate(y_test, env.model.predict(X_test), metrics))
+    return eval_callback
+
 def evaluate(y_true: np.ndarray,
              y_hat: np.ndarray,
              metrics: dict[str, Callable]) -> dict[str, float]:
@@ -157,10 +172,11 @@ def fit(df: pd.DataFrame,
         cv: SlidingWindowCV,
         param_iter: Iterator[dict[str, int|float|str]],
         target: str,
+        cat_feats: list[str],
         metrics: dict[str, Callable],
         horiz: int,
         offset: int,
-        weight_df: pd.DataFrame,
+        eval_freq: int = -1,
        **kwargs) -> tuple[list, list[lgb.LGBMRegressor]]:
     
     inds = np.arange(offset, df.shape[0]-horiz)
@@ -171,77 +187,57 @@ def fit(df: pd.DataFrame,
     # lightgbm produces the same result (eg same features during bagging) 
     # unless different seeds are set manually
     seeds = np.random.choice(np.arange(int(10e6)),size=cv.n_reps)
+    eval_metrics, test_metrics = [], []
     cv_res_list, models = [], []
     
     for ( (i_repeat,
-           i_outer,
-           i_inner,
-           perm,
+           i_fold,
+           _,
            ix_test_,
            ix_train_,
            ix_eval_ ),
           (i_param, 
            param_dict)) in product(cv.split(X,y), enumerate(param_iter)):
-        
-        print('='*100)
-        print(f'i_param: {i_param:<2}; i_outer: {i_outer:<2}; i_inner: {i_inner:<2}')
-        pprint(param_dict)
+
+        print(f'i_rep: {i_repeat:<2}; i_param: {i_param:<2}; i_outer: {i_fold:<2}')
         
         y_resid = y.values - baselines[param_dict['base_model']]
         X_train, y_train = X.iloc[ix_train_], y_resid[ix_train_]
         X_eval,  y_eval  = X.iloc[ix_eval_],  y_resid[ix_eval_]
         X_test,  y_test  = X.iloc[ix_test_],  y_resid[ix_test_]
         
-        print(X_train.shape, X_eval.shape, X_test.shape)
-
         fit_params = {
                 'X': X_train,
                 'y': y_train,
-                'categorical_feature': ['hour','day','month', 'dayofweek',
-                                    'pred_hour', 'pred_day', 'pred_month', 'pred_dayofweek'],
-            }
+                'categorical_feature': cat_feats,
+                'eval_set': [(X_eval, y_eval)],
+                'eval_metric': ['l1'],
+                'callbacks': [lgb.early_stopping(param_dict['n_early_stop_rounds'],
+                                                 first_metric_only=True,
+                                                 verbose=False,
+                                                 min_delta=param_dict['min_delta']),]}
+        eval_metrics.append([])
+        test_metrics.append([])
+        if eval_freq>0:
+            fit_params['callbacks'].append(
+                make_callback(X_eval, y_eval,
+                              X_test, y_test,
+                              eval_metrics[-1], test_metrics[-1],
+                              {'mae': mean_absolute_error}, eval_freq))
+        
         seed_params = {
             'feature_fraction_seed': seeds[i_repeat],
             'bagging_seed': seeds[i_repeat],
-        }
-        callbacks = []
-        
-        decay = param_dict.get('decay', '')
-        if decay!='':
-            callbacks.append(
-                lgb.reset_parameter(
-                    learning_rate = eval(decay)(param_dict['n_estimators']))
-            )
-
-        n_rounds = param_dict.get('n_early_stop_rounds',-1)
-        if n_rounds>0:
-            callbacks.append(
-                lgb.early_stopping(n_rounds,True,verbose=True))
-            fit_params['eval_set'] = [(X_eval, y_eval)]
-            fit_params['eval_metric'] = ['l1',]
-        
-        if param_dict.get('weights','')!='':
-            weights = { 'sample_weight': weight_df[param_dict['weights']].iloc[ix_train_].values }
-        else:
-            weights = {}
-        
-        model = ( lgb.LGBMRegressor(**param_dict, 
-                                    **seed_params)
-                 .fit(**fit_params,
-                      **weights,
-                      callbacks=callbacks))
+        }       
+        model = ( lgb.LGBMRegressor(**param_dict, **seed_params)
+                 .fit(**fit_params))
         
         models.append(model)
-
         test_loss = evaluate(y_test, model.predict(X_test), metrics)
-        if param_dict['n_early_stop_rounds']>0:
-            eval_loss = evaluate(y_eval, model.predict(X_eval), metrics)
-        else:
-            eval_loss = test_loss
-
-        cv_res_list.append([i_repeat, i_param, i_outer, i_inner, -1, -1, param_dict] +
-                                    [v for v in test_loss.values()] +
-                                    [v for v in eval_loss.values()] )
+        cv_res_list.append([i_repeat, i_fold, i_param, param_dict] +
+                                    [v for v in test_loss.values()])
+    if eval_freq>0:
+        return cv_res_list, models, eval_metrics, test_metrics
     return cv_res_list, models
 
 def cv_kfold(cv: RepeatedStratifiedKFold,
