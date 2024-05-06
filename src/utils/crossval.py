@@ -198,7 +198,7 @@ class SlidingWindowCV:
                 train_size = train_size - eval_size
 
                 if self.eval_mode=='uniform':
-                    rng.shuffle(inds[ix - self.gap - eval_size - train_size: ix])
+                    rng.shuffle(inds[ix - self.gap - eval_size - train_size: ix - self.gap])
                     
                 ix_train_ = inds[ix - self.gap - train_size - eval_size: ix - self.gap - eval_size]    
                 ix_eval_ = inds[ix - self.gap - eval_size: ix - self.gap]

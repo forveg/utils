@@ -1,39 +1,7 @@
 from utils.crossval import SlidingWindowCV
 import numpy as np
 import pytest
-
-"""
-def test_sliding_window(test_size,
-                        start,
-                        train_size,
-                        gap,
-                        n_reps,
-                        true_ix,
-                        ):
-
-    cv = SlidingWindowCV(start, test_size, train_size, gap, n_reps)
-    sz = 1000
-    dummy_X = np.arange(sz)[:,None]
-    dummy_y = np.arange(sz)
-    
-    for (i_rep,    #0
-         i_split,  #1
-         _,        #2 
-         perm,     #3
-         ix_test,  #4
-         ix_train, #5
-         ix_eval), \
-    (true_test, 
-     true_train, 
-     true_i_split, 
-     true_i_rep) in zip( cv.split(dummy_X, dummy_y), true_ix):
-    
-        assert np.array_equal(ix_test, true_test)
-        assert np.array_equal(ix_train, true_train)
-        assert np.array_equal(ix_eval, ix_test) # eval is not used, should be set to ix_test
-        assert true_i_split==i_split
-        assert true_i_rep==i_rep
-"""
+from itertools import product
 
 @pytest.mark.parametrize('last_fold, ix_test',
                          [  ('keep',
@@ -180,7 +148,7 @@ def test_SlidingWindowCV_shuffle(seed):
 
     for ( i_repeat,
             i,
-            inds,
+            inds_,
             ix_test_,
             ix_train_,
             ix_eval_) in cv.split(X, y):
@@ -194,4 +162,27 @@ def test_SlidingWindowCV_shuffle(seed):
         assert np.array_equal(ix_train_, train_true)
         assert np.array_equal(ix_eval_, eval_true)
         
+@pytest.mark.parametrize('eval_mode, gap, eval_size', 
+                            product(['sequential', 'uniform'], 
+                                    [80, 21, 59], 
+                                    [20, 0.2]) 
+                         )
+def test_SlidingWindowCV_gap(eval_mode, gap, eval_size):
+    ix_test = [(200, 240), 
+               (240, 280),
+               (280, 320)]
+    cv = SlidingWindowCV(200, 40, 120, eval_size, gap, eval_mode, 1, 'spread_out')
 
+    X = np.arange(320)[:,None]
+    y = np.arange(320)
+
+    for ( i_repeat,
+            i,
+            inds,
+            ix_test_,
+            ix_train_,
+            ix_eval_) in cv.split(X, y):
+        
+        assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
+        assert np.max(ix_train_)<ix_test_[0]-gap
+        assert np.max(ix_eval_)<ix_test_[0]-gap
