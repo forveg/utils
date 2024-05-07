@@ -131,39 +131,9 @@ def test_SlidingWindowCV_train_minus_one(size, ix_test):
         assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
         assert np.array_equal(ix_eval_, np.arange(ix_test[i][0]-cv.gap-cv.eval_size, ix_test[i][0]-cv.gap))
         assert np.array_equal(ix_train_, np.arange(0, ix_test[i][0]-cv.gap-cv.eval_size))
-
-@pytest.mark.parametrize('seed',
-                         [1970, 99, 1861, 42])
-def test_SlidingWindowCV_shuffle(seed):
-    ix_test = [(200, 240), 
-               (240, 280),
-               (280, 320)]
-    eval_size = 0.15
-    cv = SlidingWindowCV(200, 40, -1, eval_size, 10, 'uniform', 1, 'spread_out', seed)
-    rng = np.random.default_rng(seed)
-    inds = np.arange(320)
-
-    X = np.arange(320)[:,None]
-    y = np.arange(320)
-
-    for ( i_repeat,
-            i,
-            inds_,
-            ix_test_,
-            ix_train_,
-            ix_eval_) in cv.split(X, y):
-        assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
-        eval_size_true = int(np.ceil(eval_size*(ix_test[i][0]-cv.gap)))
-        
-        rng.shuffle(inds[:ix_test[i][0]-cv.gap])
-        train_true = inds[: ix_test[i][0]-cv.gap-eval_size_true]
-        eval_true  = inds[ ix_test[i][0]-cv.gap-eval_size_true : ix_test[i][0]-cv.gap]
-        
-        assert np.array_equal(ix_train_, train_true)
-        assert np.array_equal(ix_eval_, eval_true)
         
 @pytest.mark.parametrize('eval_mode, gap, eval_size', 
-                            product(['sequential', 'uniform'], 
+                            product(['sequential', 'shuffle', 'tail-shuffle'], 
                                     [80, 21, 59], 
                                     [20, 0.2]) 
                          )
@@ -178,7 +148,7 @@ def test_SlidingWindowCV_gap(eval_mode, gap, eval_size):
 
     for ( i_repeat,
             i,
-            inds,
+            inds_,
             ix_test_,
             ix_train_,
             ix_eval_) in cv.split(X, y):
@@ -186,3 +156,168 @@ def test_SlidingWindowCV_gap(eval_mode, gap, eval_size):
         assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
         assert np.max(ix_train_)<ix_test_[0]-gap
         assert np.max(ix_eval_)<ix_test_[0]-gap
+
+@pytest.mark.parametrize('train_size, eval_size, seed', 
+                            [(100, 0.15, 5),
+                             (100, 20, 5),
+                             (100, 0.71, 99),
+                             (80, 0.3, 1868),
+                             (80, 30, 90)] 
+                         )
+def test_SlidingWindowCV_shuffle_fixed_train(train_size, eval_size, seed):
+    ix_test = [(200, 240), 
+               (240, 280),
+               (280, 320)]  
+    sz = ix_test[-1][1]
+    
+    cv = SlidingWindowCV(200, 40, train_size, eval_size, 10, 'shuffle', 1, 'spread_out', seed)
+    rng = np.random.default_rng(seed)
+    inds = np.arange(sz)
+
+    X = np.arange(sz)[:,None]
+    y = np.arange(sz)
+
+    for ( i_repeat,
+            i,
+            inds_,
+            ix_test_,
+            ix_train_,
+            ix_eval_) in cv.split(X, y):
+        assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
+        
+        eval_size_true = int(np.ceil(eval_size*train_size)) if isinstance(eval_size, float) else eval_size
+        train_size_true = train_size - eval_size_true
+
+        inds = np.arange(sz)
+        train_start = ix_test[i][0]-cv.gap-eval_size_true-train_size_true
+        rng.shuffle(inds[train_start : ix_test[i][0]-cv.gap])
+        train_true = inds[train_start : ix_test[i][0]-cv.gap-eval_size_true]
+        eval_true  = inds[train_start + train_size_true: ix_test[i][0]-cv.gap]
+        
+        assert np.array_equal(inds_, inds)
+        assert np.array_equal(ix_train_, train_true)
+        assert np.array_equal(ix_eval_, eval_true)
+
+
+@pytest.mark.parametrize('train_size, eval_size, seed', 
+                            [(100, 0.15, 5),
+                             (100, 20, 5),
+                             (100, 0.71, 99),
+                             (80, 0.3, 1868),
+                             (80, 30, 90)] 
+                         )
+def test_SlidingWindowCV_tail_shuffle_fixed_train(train_size, eval_size, seed):
+    ix_test = [(200, 240), 
+               (240, 280),
+               (280, 320)]
+    sz = ix_test[-1][1]
+    cv = SlidingWindowCV(200, 40, train_size, eval_size, 10, 'tail-shuffle', 1, 'spread_out', seed)
+    rng = np.random.default_rng(seed)
+    inds = np.arange(sz)
+
+    X = np.arange(sz)[:,None]
+    y = np.arange(sz)
+
+    for ( i_repeat,
+            i,
+            inds_,
+            ix_test_,
+            ix_train_,
+            ix_eval_) in cv.split(X, y):
+        assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
+        
+        eval_size_true = int(np.ceil(eval_size*train_size)) if isinstance(eval_size, float) else eval_size
+        train_size_true = train_size - eval_size_true
+
+        train_start = ix_test[i][0]-cv.gap-eval_size_true-train_size_true
+        rng.shuffle(inds[train_start : ix_test[i][0]-cv.gap])
+        train_true = inds[train_start : ix_test[i][0]-cv.gap-eval_size_true]
+        eval_true  = inds[train_start + train_size_true: ix_test[i][0]-cv.gap]
+        
+        assert np.array_equal(inds_, inds)
+        assert np.array_equal(ix_train_, train_true)
+        assert np.array_equal(ix_eval_, eval_true)
+        
+@pytest.mark.parametrize('eval_size, seed', 
+                            [(0.15, 5),
+                             (80,   99),
+                             (0.7,  1868),
+                             (11,   90)] 
+                         )
+def test_SlidingWindowCV_tail_shuffle_available_train(eval_size, seed):
+    ix_test = [(200, 240), 
+               (240, 280),
+               (280, 320)]
+    
+    sz = ix_test[-1][1]
+    cv = SlidingWindowCV(200, 40, -1, eval_size, 10, 'tail-shuffle', 1, 'spread_out', seed)
+    rng = np.random.default_rng(seed)
+    inds = np.arange(sz)
+
+    X = np.arange(sz)[:,None]
+    y = np.arange(sz)
+
+    for ( i_repeat,
+            i,
+            inds_,
+            ix_test_,
+            ix_train_,
+            ix_eval_) in cv.split(X, y):
+        assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
+        
+        eval_size_true = int(np.ceil(eval_size*(ix_test[i][0]-cv.gap))) if isinstance(eval_size, float) else eval_size
+        train_size_true = ix_test[i][0] - cv.gap - eval_size_true
+
+        train_start = ix_test[i][0]-cv.gap-eval_size_true-train_size_true
+        rng.shuffle(inds[train_start: ix_test[i][0]-cv.gap])
+        
+        train_true = inds[train_start: ix_test[i][0]-cv.gap-eval_size_true]
+        eval_true  = inds[train_start + train_size_true: ix_test[i][0]-cv.gap]
+        
+        assert np.array_equal(inds_, inds)
+        assert np.array_equal(ix_train_, train_true)
+        assert np.array_equal(ix_eval_, eval_true)
+        # assert np.concatenate([ix_train_, ix_eval_]).min()==0
+        # assert np.concatenate([ix_train_, ix_eval_]).max()==ix_test[i][0]-cv.gap-1
+
+@pytest.mark.parametrize('eval_size, seed', 
+                            [(0.15, 5),
+                             (80,   99),
+                             (0.7,  1868),
+                             (11,   90)] 
+                         )
+def test_SlidingWindowCV_shuffle_available_train(eval_size, seed):
+    ix_test = [(200, 240), 
+               (240, 280),
+               (280, 320)]
+    
+    sz = ix_test[-1][1]
+    cv = SlidingWindowCV(200, 40, -1, eval_size, 10, 'shuffle', 1, 'spread_out', seed)
+    rng = np.random.default_rng(seed)
+    inds = np.arange(sz)
+
+    X = np.arange(sz)[:,None]
+    y = np.arange(sz)
+
+    for ( i_repeat,
+            i,
+            inds_,
+            ix_test_,
+            ix_train_,
+            ix_eval_) in cv.split(X, y):
+        assert np.array_equal(ix_test_, np.arange(ix_test[i][0], ix_test[i][1]))
+        
+        eval_size_true = int(np.ceil(eval_size*(ix_test[i][0]-cv.gap))) if isinstance(eval_size, float) else eval_size
+        train_size_true = ix_test[i][0] - cv.gap - eval_size_true
+
+        train_start = ix_test[i][0]-cv.gap-eval_size_true-train_size_true
+        
+        inds = np.arange(sz)
+        rng.shuffle(inds[train_start: ix_test[i][0]-cv.gap])
+        
+        train_true = inds[train_start: ix_test[i][0]-cv.gap-eval_size_true]
+        eval_true  = inds[train_start + train_size_true: ix_test[i][0]-cv.gap]
+        
+        assert np.array_equal(inds_, inds)
+        assert np.array_equal(ix_train_, train_true)
+        assert np.array_equal(ix_eval_, eval_true)
