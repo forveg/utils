@@ -1,11 +1,12 @@
 import pandas as pd    
-import numpy as np    
+import numpy as np   
+import warnings 
 
-from itertools import product
-from collections import defaultdict
-from functools import reduce
-from typing import Iterator, TypeAlias
 from sklearn.model_selection import KFold, StratifiedKFold
+from typing import Iterator, TypeAlias
+from collections import defaultdict
+from itertools import product
+from functools import reduce
 
 class SlidingWindowCV:  
 
@@ -18,7 +19,8 @@ class SlidingWindowCV:
                  eval_mode: str = 'sequential',
                  n_reps: int = 1,
                  last_fold: str = 'spread_out',
-                 seed = None) -> None:    
+                 seed = None,
+                 suppress_warnings: bool = True) -> None:    
         """Sliding window split generator a-la sklearn. More finely customizable
         See https://scikit-learn.org/stable/modules/cross_validation.html#time-series-split for illustration 
         
@@ -107,6 +109,7 @@ class SlidingWindowCV:
         self.gap = gap
         self.n_reps = n_reps
         self.seed = seed
+        self.suppress_warnings = suppress_warnings
 
         if last_fold not in ['spread_out', 'drop', 'keep']:
             raise ValueError("Expected `last_fold` in {'spread_out', 'drop'}")       
@@ -147,7 +150,7 @@ class SlidingWindowCV:
                             f'start: {self.start}, test: {self.test_size}, X: {sz}')
         
     
-    SplitIter : TypeAlias = Iterator[tuple[int, int, int, 
+    SplitIter : TypeAlias = Iterator[tuple[int, int, 
                                            np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
     
     def split(self, X: pd.DataFrame | np.ndarray,
@@ -166,21 +169,19 @@ class SlidingWindowCV:
         split : tuple of the form
             ( repetition_index,
               split_index,
-              -1, # unused
-              permutation, # unused
-              test_index,
-              train_index,
-              eval_index # equals test_index, unused
+              all_indices, # for debugging
+              test_indices,
+              train_indices,
+              eval_indices
             )
-            Unused fields are for compatibility
         """
         self.validate_input(X)
         sz = X.shape[0]
         test_sizes = self._get_test_sizes(sz)
         
-        if any(test_sizes!=self.test_size):
-            print('Samples from the last (incomplete) fold were spread out: '
-                 f'resulting folds: {list(test_sizes)}')
+        if any(test_sizes!=self.test_size) and not self.suppress_warnings:
+            warnings.warn('Samples from the last (incomplete) fold were spread out: '
+                          f'resulting folds: {list(test_sizes)}')
 
         rng = np.random.default_rng(self.seed)
 
@@ -235,162 +236,6 @@ class SlidingWindowCV:
         """
         self.validate_input(X)
         return int((X.shape[0] - self.start)//self.test_size) * self.n_reps    
-
-class SlidingWindowCV_legacy:  
-
-    def __init__(self, 
-                 start: int,
-                 test_size: int,
-                 train_size: int,
-                 gap: int,
-                 n_reps: int = 1) -> None:    
-        """Sliding window split generator a-la sklearn. More finely customizable
-        See https://scikit-learn.org/stable/modules/cross_validation.html#time-series-split for illustration 
-        
-        Parameters
-        ----------
-        start : int
-            Position of the first test fold
-        test_size : int
-            *Nominal* test fold size (see below)
-        train_size : int (set train_size = -1 to use all available past data)
-            Train fold size
-        gap : int
-            The gap between train and test split - to exclude highly correlated (adjacent) regions
-        
-        Example
-        -------
-        start      = 13
-        test_size  = 5
-        train_size = 8
-        gap        = 2
-        
-        would yield the following partitions for the series of length 24:
-        
-          00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 
-        -------------------------------------------------------------------------
-        0          x0 x0 x0 x0 x0 x0 x0 x0 _  _  y0 y0 y0 y0 y0       
-        1                         x1 x1 x1 x1 x1 x1 x1 x1 _  _  y1 y1 y1 y1 y1 y1             
-       
-        where x%d, y%d, _ denote train, test and gaps respectively.
-        Test fold slides forward, starting at ``start`` position, with implicit stride=test_size.
-       
-        Note, if a time series fits non-integer number of test folds (eg series of length 13 and 
-        test_size = 5), then the last smaller fold would be spread over bigger ones 
-        (eg 5,5,3 would result in 6,7).
-        """
-        if train_size+gap>start:
-            raise ValueError('(`train_size` + `gap`) must be less than or equal to `start`')
-        
-        self.start = start
-        self.test_size = test_size
-        self.train_size = train_size
-        self.gap = gap
-        self.n_reps = n_reps
-        
-    def _get_test_sizes(self, sz: int) -> np.ndarray:
-        """Calculates actual sizes of test folds
-        
-        Parameters
-        ----------
-        sz : int
-            Length of time series
-        start: int
-            Position of the first test fold
-        test_size : int
-            Nominal test fold size
-        
-        Returns
-        -------
-        test_sizes : np.ndarray
-            Actual sizes of test folds
-        """
-        n_splits = int((sz - self.start)//self.test_size)
-        test_sizes = np.ones(n_splits, dtype=np.int16)*self.test_size
-        rem = (sz-self.start) % self.test_size
-        test_sizes += rem//n_splits
-        test_sizes[-1] += rem%n_splits
-        return test_sizes
-    
-    def validate_input(self, X: pd.DataFrame) -> None:
-        sz = X.shape[0]
-        if self.start>sz or self.start + self.test_size>sz:
-            raise ValueError('Input is too small for the sizes provided: '
-                            f'start: {self.start}, test: {self.test_size}, X: {sz}')
-    
-    SplitIter : TypeAlias = Iterator[tuple[int, int, int, 
-                                           np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
-    
-    def split(self, X: pd.DataFrame | np.ndarray,
-              y: pd.DataFrame | np.ndarray) -> SplitIter:
-        """Iterates over splits
-        
-        Parameters
-        ----------
-        X : pd.DataFrame | np.ndarray
-            X of the training pair
-        y : pd.DataFrame | np.ndarray
-            target of training pair, not used
-        
-        Returns
-        -------
-        split : tuple of the form
-            ( repetition_index,
-              split_index,
-              -1, # unused
-              permutation, # unused
-              test_index,
-              train_index,
-              eval_index # equals test_index, unused
-            )
-            Unused fields are for compatibility
-        """
-        self.validate_input(X)
-        sz = X.shape[0]
-        
-        test_sizes = self._get_test_sizes(sz)
-        if any(test_sizes!=self.test_size):
-            print('Samples from the last (incomplete) fold were spread out: '
-                 f'resulting folds: {list(test_sizes)}')
-            
-        n_splits = test_sizes.shape[0]
-        perm = np.arange(sz)           
-        for i_repeat in range(self.n_reps):
-            ix = self.start
-            for i in range(n_splits):
-
-                ix_test_  = perm[ix : ix+test_sizes[i]]
-                if self.train_size==-1:
-                    ix_train_ = perm[ : ix - self.gap]
-                else:
-                    ix_train_ = perm[ix - self.train_size - self.gap : ix - self.gap]
-                ix_eval_ = ix_test_
-                yield ( i_repeat,
-                           i,
-                           -1,
-                           perm,
-                           ix_test_,
-                           ix_train_,
-                           ix_eval_, 
-                          )
-                ix += test_sizes[i]
-
-    def get_n_splits(self, X: pd.DataFrame) -> int:
-        """Returns total number of splits
-        
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Time series dataframe. Number of splits is unknown in advance,
-            it depends on the position of ``start`` within series
-        
-        Returns
-        -------
-        n_splits : int
-            Number of splits
-        """
-        self.validate_input(X)
-        return int((X.shape[0] - self.start)//self.test_size) * self.n_reps
     
 class NestedKFold:
     def __init__(self, n_repeats, n_outer, n_inner, n_outer_used, n_inner_used, seed=None):
