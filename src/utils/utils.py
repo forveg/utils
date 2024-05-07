@@ -2,10 +2,12 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import lightgbm as lgb
+import matplotlib
 
 from matplotlib.legend_handler import HandlerTuple
 from glob import glob
 
+from .crossval import SlidingWindowCV
 from .train import get_Xy, get_baseline
 
 def summary(cv_res: pd.DataFrame, 
@@ -66,6 +68,45 @@ def hist_metrics(figsize: tuple[int, int],
         ax[i].axvline(g[metric].median(), lw=0.8, c='g')
         ax[i].set_ylabel(i)
         plt.tight_layout(h_pad=0)
+
+def plot_cv_splits(cv: SlidingWindowCV,
+                   offset: int,
+                   size: int,
+                   title: str,
+                   figsize: tuple[float,float]=(7,1)) -> matplotlib.axes._axes.Axes:
+    dummy_X, dummy_y = np.arange(size)[:,None], np.arange(size)
+    n_splits = len([x for x in cv.split(dummy_X, dummy_y)])
+    
+    fig,ax=plt.subplots(n_splits, 1, figsize=figsize, sharex=True)
+    for ( i_repeat,
+         i_fold,
+         _,
+         ix_test,
+         ix_train,
+         ix_eval ) in cv.split(dummy_X, dummy_y):
+
+        ix_test_  = ix_test + offset
+        ix_train_ = ix_train + offset
+        ix_eval_  = ix_eval + offset
+
+        lw = 3
+        ax[i_fold].vlines(ix_train_, 0,1,colors='lightsteelblue', alpha=0.5, lw=lw)
+        ax[i_fold].vlines(ix_eval_, 0,1,colors='royalblue', alpha=0.5, lw=2.5)
+        ax[i_fold].vlines(ix_test_, 0,1,colors='green', alpha=0.2, lw=lw)
+        ax[i_fold].vlines(np.arange(offset), 0,1,colors='grey', alpha=0.2, lw=lw)
+
+        ax[i_fold].set_xticks(np.arange(0, dummy_X.shape[0]+1, 20))
+        ax[i_fold].set_yticks([])
+
+    for x,label in [
+        (2,  'offset'),
+        #(40, 'train'),
+        #(74, 'eval'),
+        (84, 'gap'),
+        (94, 'test')]:
+        ax[0].text(x,  0.5, label, fontsize=9)
+    ax[0].set_title(title, fontsize=9)
+    return ax
 
 def barplot_metrics(res_df: pd.DataFrame, metric: str) -> None:
     groups = res_df.groupby('i_param')
