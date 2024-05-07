@@ -36,9 +36,12 @@ class SlidingWindowCV:
                       if float, must be 0<eval_size<1, fraction of train_size
         gap : int
             The gap between train and test split - to exclude highly correlated (adjacent) regions
-        eval_mode : str {'sequential', 'uniform'}
+        eval_mode : str {'sequential', 'shuffle', 'tail-shuffle}
             If 'sequential', eval fold is located at the end of train fold;
-            If 'uniform', eval fold is a random subset of train fold
+            If 'shuffle', eval fold is a random subset of train fold
+            If 'tail-shuffle', train and eval are random subsets of all available data
+            up to this point (ie at any point train+eval size is fixed and equal to `train_size`,
+            but it gets sampled from the entire tail)
         n_reps : int (default 1)
             Number of repititions.
         last_fold : str {'spread_out', 'keep', 'drop'}
@@ -97,8 +100,9 @@ class SlidingWindowCV:
         (start < self.train_size + gap):
             raise ValueError('`start` has to be greater than `train_size`+`gap`')
         
-        if eval_mode not in ['uniform', 'sequential']:
-            raise ValueError(f'Expected `eval_mode` in {"uniform", "sequential"}, got: {eval_mode}')
+        eval_modes = ['shuffle', 'tail-shuffle', 'sequential']
+        if eval_mode not in eval_modes:
+            raise ValueError(f'Expected `eval_mode` in {eval_modes}, got: {eval_mode}')
         self.eval_mode = eval_mode
         self.gap = gap
         self.n_reps = n_reps
@@ -197,9 +201,12 @@ class SlidingWindowCV:
                 
                 train_size = train_size - eval_size
 
-                if self.eval_mode=='uniform':
+                if self.eval_mode=='tail-shuffle':
                     rng.shuffle(inds[ix - self.gap - eval_size - train_size: ix - self.gap])
-                    
+                elif self.eval_mode=='shuffle':
+                    inds = np.arange(sz)
+                    rng.shuffle(inds[ix - self.gap - eval_size - train_size: ix - self.gap])
+
                 ix_train_ = inds[ix - self.gap - train_size - eval_size: ix - self.gap - eval_size]    
                 ix_eval_ = inds[ix - self.gap - eval_size: ix - self.gap]
                         
