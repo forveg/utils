@@ -1,20 +1,26 @@
 import pandas as pd    
-import numpy as np    
+import numpy as np   
+import warnings 
 
-from itertools import product
-from collections import defaultdict
-from functools import reduce
-from typing import Iterator, TypeAlias
 from sklearn.model_selection import KFold, StratifiedKFold
-    
+from typing import Iterator, TypeAlias
+from collections import defaultdict
+from itertools import product
+from functools import reduce
+
 class SlidingWindowCV:  
 
     def __init__(self, 
                  start: int,
                  test_size: int,
                  train_size: int,
+                 eval_size: int | float,
                  gap: int,
-                 n_reps: int = 1) -> None:    
+                 eval_mode: str = 'sequential',
+                 n_reps: int = 1,
+                 last_fold: str = 'spread_out',
+                 seed = None,
+                 suppress_warnings: bool = True) -> None:    
         """Sliding window split generator a-la sklearn. More finely customizable
         See https://scikit-learn.org/stable/modules/cross_validation.html#time-series-split for illustration 
         
@@ -24,41 +30,91 @@ class SlidingWindowCV:
             Position of the first test fold
         test_size : int
             *Nominal* test fold size (see below)
-        train_size : int (set train_size = -1 to use all available past data)
-            Train fold size
+        train_size : int 
+           Total train fold size, *including* eval fold.
+           Set train_size=-1 to use all available past data
+        eval_size : int | float 
+           Eval size: if int, must be eval_size<train_size
+                      if float, must be 0<eval_size<1, fraction of train_size
         gap : int
             The gap between train and test split - to exclude highly correlated (adjacent) regions
+        eval_mode : str {'sequential', 'shuffle', 'tail-shuffle}
+            If 'sequential', eval fold is located at the end of train fold;
+            If 'shuffle', eval fold is a random subset of train fold
+            If 'tail-shuffle', train and eval are random subsets of all available data
+            up to this point (ie at any point train+eval size is fixed and equal to `train_size`,
+            but it gets sampled from the entire tail)
+        n_reps : int (default 1)
+            Number of repititions.
+        last_fold : str {'spread_out', 'keep', 'drop'}
+            'spread_out': is the last fold is smaller than `test_size`,
+            spread it evenly across other folds. If there is a remainder,
+            add it to the last fold;
+
+            'keep': keep last smaller fold as is;
+            'drop': drop last smaller fold  
         
         Example
         -------
         start      = 13
         test_size  = 5
         train_size = 8
+        eval_size  = 3
         gap        = 2
+        eval_mode  = 'sequential'
         
         would yield the following partitions for the series of length 24:
         
           00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 
         -------------------------------------------------------------------------
-        0          x0 x0 x0 x0 x0 x0 x0 x0 _  _  y0 y0 y0 y0 y0       
-        1                         x1 x1 x1 x1 x1 x1 x1 x1 _  _  y1 y1 y1 y1 y1 y1             
+        0          x0 x0 x0 x0 x0 e0 e0 e0 _  _  y0 y0 y0 y0 y0       
+        1                         x1 x1 x1 x1 x1 e1 e1 e1 _  _  y1 y1 y1 y1 y1 y1             
        
-        where x%d, y%d, _ denote train, test and gaps respectively.
+        where x%d, e%d, y%d, _ denote train, eval, test and gap respectively.
         Test fold slides forward, starting at ``start`` position, with implicit stride=test_size.
        
-        Note, if a time series fits non-integer number of test folds (eg series of length 13 and 
-        test_size = 5), then the last smaller fold would be spread over bigger ones 
-        (eg 5,5,3 would result in 6,7).
         """
         if train_size+gap>start:
             raise ValueError('(`train_size` + `gap`) must be less than or equal to `start`')
         
         self.start = start
         self.test_size = test_size
+        
+        if train_size<=0 and train_size!=-1:
+            raise ValueError('Expected `train_size`>0 or `train_size`=-1')
+        if isinstance(eval_size, float) and (eval_size<=0 or eval_size>=1):
+            raise ValueError('Expected float `eval_size` in (0; 1)')
+        
         self.train_size = train_size
+        if train_size==-1:
+            self.eval_size = eval_size
+        elif isinstance(eval_size, float):           
+            self.eval_size = int(np.ceil(eval_size*train_size))
+        else:
+        # train_size>0 and eval_size is int
+            if eval_size<=0:
+                raise ValueError('Expected positive `eval_size`')
+            if eval_size >= train_size:
+                raise ValueError('`eval_size` has to be less than `train_size`')
+            self.eval_size = eval_size
+        
+        if self.train_size!=-1 and (not isinstance(self.eval_size, float)) and \
+        (start < self.train_size + gap):
+            raise ValueError('`start` has to be greater than `train_size`+`gap`')
+        
+        eval_modes = ['shuffle', 'tail-shuffle', 'sequential']
+        if eval_mode not in eval_modes:
+            raise ValueError(f'Expected `eval_mode` in {eval_modes}, got: {eval_mode}')
+        self.eval_mode = eval_mode
         self.gap = gap
         self.n_reps = n_reps
-        
+        self.seed = seed
+        self.suppress_warnings = suppress_warnings
+
+        if last_fold not in ['spread_out', 'drop', 'keep']:
+            raise ValueError("Expected `last_fold` in {'spread_out', 'drop'}")       
+        self.last_fold = last_fold
+
     def _get_test_sizes(self, sz: int) -> np.ndarray:
         """Calculates actual sizes of test folds
         
@@ -79,8 +135,12 @@ class SlidingWindowCV:
         n_splits = int((sz - self.start)//self.test_size)
         test_sizes = np.ones(n_splits, dtype=np.int16)*self.test_size
         rem = (sz-self.start) % self.test_size
-        test_sizes += rem//n_splits
-        test_sizes[-1] += rem%n_splits
+            
+        if self.last_fold=='spread_out':
+            test_sizes += rem//n_splits
+            test_sizes[-1] += rem%n_splits
+        elif self.last_fold=='keep':
+            test_sizes = np.r_[test_sizes, rem]
         return test_sizes
     
     def validate_input(self, X: pd.DataFrame) -> None:
@@ -88,8 +148,9 @@ class SlidingWindowCV:
         if self.start>sz or self.start + self.test_size>sz:
             raise ValueError('Input is too small for the sizes provided: '
                             f'start: {self.start}, test: {self.test_size}, X: {sz}')
+        
     
-    SplitIter : TypeAlias = Iterator[tuple[int, int, int, 
+    SplitIter : TypeAlias = Iterator[tuple[int, int, 
                                            np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
     
     def split(self, X: pd.DataFrame | np.ndarray,
@@ -108,38 +169,51 @@ class SlidingWindowCV:
         split : tuple of the form
             ( repetition_index,
               split_index,
-              -1, # unused
-              permutation, # unused
-              test_index,
-              train_index,
-              eval_index # equals test_index, unused
+              all_indices, # for debugging
+              test_indices,
+              train_indices,
+              eval_indices
             )
-            Unused fields are for compatibility
         """
         self.validate_input(X)
         sz = X.shape[0]
-        
         test_sizes = self._get_test_sizes(sz)
-        if any(test_sizes!=self.test_size):
-            print('Samples from the last (incomplete) fold were spread out: '
-                 f'resulting folds: {list(test_sizes)}')
-            
+        
+        if any(test_sizes!=self.test_size) and not self.suppress_warnings:
+            warnings.warn('Samples from the last (incomplete) fold were spread out: '
+                          f'resulting folds: {list(test_sizes)}')
+
+        rng = np.random.default_rng(self.seed)
+
         n_splits = test_sizes.shape[0]
-        perm = np.arange(sz)           
+        inds = np.arange(sz)           
         for i_repeat in range(self.n_reps):
             ix = self.start
             for i in range(n_splits):
 
-                ix_test_  = perm[ix : ix+test_sizes[i]]
+                ix_test_  = inds[ix : ix+test_sizes[i]]
+                train_size = self.train_size
                 if self.train_size==-1:
-                    ix_train_ = perm[ : ix - self.gap]
-                else:
-                    ix_train_ = perm[ix - self.train_size - self.gap : ix - self.gap]
-                ix_eval_ = ix_test_
+                    train_size = ix - self.gap
+                    
+                eval_size = self.eval_size
+                if isinstance(self.eval_size, float):
+                    eval_size = int(np.ceil(self.eval_size * train_size))  
+                
+                train_size = train_size - eval_size
+
+                if self.eval_mode=='tail-shuffle':
+                    rng.shuffle(inds[ix - self.gap - eval_size - train_size: ix - self.gap])
+                elif self.eval_mode=='shuffle':
+                    inds = np.arange(sz)
+                    rng.shuffle(inds[ix - self.gap - eval_size - train_size: ix - self.gap])
+
+                ix_train_ = inds[ix - self.gap - train_size - eval_size: ix - self.gap - eval_size]    
+                ix_eval_ = inds[ix - self.gap - eval_size: ix - self.gap]
+                        
                 yield ( i_repeat,
                            i,
-                           -1,
-                           perm,
+                           inds,
                            ix_test_,
                            ix_train_,
                            ix_eval_, 
@@ -161,7 +235,7 @@ class SlidingWindowCV:
             Number of splits
         """
         self.validate_input(X)
-        return int((X.shape[0] - self.start)//self.test_size) * self.n_reps
+        return int((X.shape[0] - self.start)//self.test_size) * self.n_reps    
     
 class NestedKFold:
     def __init__(self, n_repeats, n_outer, n_inner, n_outer_used, n_inner_used, seed=None):

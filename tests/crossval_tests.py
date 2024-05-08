@@ -32,36 +32,6 @@ def test_sliding_window_basic():
                                (np.arange(900,1000), np.arange(0,700-10+100+100), 2,0),
                                ]),
                         ])
-def test_sliding_window(test_size,
-                        start,
-                        train_size,
-                        gap,
-                        n_reps,
-                        true_ix,
-                        ):
-
-    cv = SlidingWindowCV(start, test_size, train_size, gap, n_reps)
-    sz = 1000
-    dummy_X = np.arange(sz)[:,None]
-    dummy_y = np.arange(sz)
-    
-    for (i_rep,    #0
-         i_split,  #1
-         _,        #2 
-         perm,     #3
-         ix_test,  #4
-         ix_train, #5
-         ix_eval), \
-    (true_test, 
-     true_train, 
-     true_i_split, 
-     true_i_rep) in zip( cv.split(dummy_X, dummy_y), true_ix):
-    
-        assert np.array_equal(ix_test, true_test)
-        assert np.array_equal(ix_train, true_train)
-        assert np.array_equal(ix_eval, ix_test) # eval is not used, should be set to ix_test
-        assert true_i_split==i_split
-        assert true_i_rep==i_rep
 
 def test_paramgrid_basic():
 

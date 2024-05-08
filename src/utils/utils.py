@@ -2,11 +2,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import lightgbm as lgb
+import matplotlib
 
+from matplotlib.legend_handler import HandlerTuple
+from glob import glob
+
+from .crossval import SlidingWindowCV
 from .train import get_Xy, get_baseline
-
-def q95(x):
-    return np.quantile(x, 0.95)
 
 def summary(cv_res: pd.DataFrame, 
             aggregates: list = ['median', 'std']) -> pd.DataFrame:
@@ -52,21 +54,59 @@ def feat_importance(model, silent=False):
         print(f'{(imp.splits==0).sum()}/{imp.shape[0]} unused')
     return imp
 
-def hist_metrics(res_df: pd.DataFrame, metric: str) -> None:
+def hist_metrics(figsize: tuple[int, int],
+                 res_df: pd.DataFrame, 
+                 metric: str) -> None:
     groups = res_df.groupby('i_param')
     n_groups = groups.size().shape[0]
 
-    fig,ax=plt.subplots(n_groups, 1, figsize=(10,n_groups*0.5), sharex=True)
+    fig,ax=plt.subplots(n_groups, 1, figsize=figsize, sharex=True)
     for i in range(n_groups):       
         g = groups.get_group(i)
         
-        #cnts, bins = np.histogram(g[metric], bins=30)
-        #ax[i].bar(bins[1:], cnts/np.sum(cnts), (bins[-1]-bins[0])/50, alpha=0.5)
         ax[i].hist(g[metric], bins=30, alpha=0.5)
         ax[i].axvline(g[metric].median(), lw=0.8, c='g')
         ax[i].set_ylabel(i)
         plt.tight_layout(h_pad=0)
 
+def plot_cv_splits(cv: SlidingWindowCV,
+                   offset: int,
+                   size: int,
+                   title: str,
+                   figsize: tuple[float,float]=(7,1)) -> matplotlib.axes._axes.Axes:
+    dummy_X, dummy_y = np.arange(size)[:,None], np.arange(size)
+    n_splits = len([x for x in cv.split(dummy_X, dummy_y)])
+    
+    fig,ax=plt.subplots(n_splits, 1, figsize=figsize, sharex=True)
+    for ( i_repeat,
+         i_fold,
+         _,
+         ix_test,
+         ix_train,
+         ix_eval ) in cv.split(dummy_X, dummy_y):
+
+        ix_test_  = ix_test + offset
+        ix_train_ = ix_train + offset
+        ix_eval_  = ix_eval + offset
+
+        lw = 3
+        ax[i_fold].vlines(ix_train_, 0,1,colors='lightsteelblue', alpha=0.5, lw=lw)
+        ax[i_fold].vlines(ix_eval_, 0,1,colors='royalblue', alpha=0.5, lw=2.5)
+        ax[i_fold].vlines(ix_test_, 0,1,colors='green', alpha=0.2, lw=lw)
+        ax[i_fold].vlines(np.arange(offset), 0,1,colors='grey', alpha=0.2, lw=lw)
+
+        ax[i_fold].set_xticks(np.arange(0, dummy_X.shape[0]+1, 20))
+        ax[i_fold].set_yticks([])
+
+    for x,label in [
+        (2,  'offset'),
+        #(40, 'train'),
+        #(74, 'eval'),
+        (84, 'gap'),
+        (94, 'test')]:
+        ax[0].text(x,  0.5, label, fontsize=9)
+    ax[0].set_title(title, fontsize=9)
+    return ax
 
 def barplot_metrics(res_df: pd.DataFrame, metric: str) -> None:
     groups = res_df.groupby('i_param')
@@ -99,32 +139,101 @@ def barplot_metrics(res_df: pd.DataFrame, metric: str) -> None:
         
     #ax[0].legend(labels=[f'fold_{i}' for i in range(res_df.fold_outer.max())])
 
-def display_predict(df, models, pred_start, horiz, target, margin=40, scatter=False, legend_params=None):
-    fig,ax=plt.subplots(figsize=(12,3))
-    dtime = df[target].iloc[pred_start-margin : pred_start+horiz].index
-    ax.plot(dtime, df[target].iloc[pred_start-margin : pred_start+horiz].values)
+def display_predict(df: pd.DataFrame, 
+                    models: list[lgb.LGBMRegressor | lgb.Booster],
+                    labels: list[str],
+                    pred_start: int,
+                    horiz: int,
+                    target: str,
+                    as_quantiles: bool = False,
+                    margin: int = 40,
+                    figsize: tuple[int,int] = (8,2)):
+    """
+    Parameters
+    ----------
+    pred_start : int
+        First index to be predicted
+    as_quantiles : bool
+        - If true, treat first and last models as quantile regressions and 
+        fill the space between them on the plot. Plot models in between 
+        as separate lines
+        - If false, plot all predictions as separate lines
+    margin : int
+        How many data points before `pred_start` to display
+    """
+    fig,ax=plt.subplots(figsize=figsize)
+    dtime = df[target].iloc[pred_start-margin: pred_start+horiz].index
+    ax.plot(dtime, df[target].iloc[pred_start-margin: pred_start+horiz].values, c='k')
     
     if isinstance(models[0], lgb.LGBMRegressor):
         models = [m.booster_ for m in models]
+    
+    bases, y_hats = [], []
+    X,_ = get_Xy(df, np.arange(pred_start-horiz, pred_start), horiz, target)
     for m in models:
-        X,_ = get_Xy(df, np.arange(pred_start-horiz, pred_start), horiz, target)
         base = get_baseline(df, 
                             np.arange(pred_start-horiz, pred_start), 
                             horiz, 
                             target,
                             m.params['base_model'])
         y_hat = base + m.predict(X)
-        if scatter:
-            ax.scatter(dtime[margin: margin+horiz], y_hat, alpha=0.5, s=2)
-        else:
-            ax.plot(dtime[margin: margin+horiz], y_hat, alpha=0.5)
-    labels = ['target']
-    if legend_params:
-        labels += [' '.join([str(m.params[p]) for p in legend_params]) for m in models]
-    else:
-        labels += [str(x) for x in np.arange(len(models))]
-    ax.legend(labels)
+        bases.append(base)
+        y_hats.append(y_hat)
     
+    if as_quantiles:
+        ax.fill_between(dtime[margin: margin+horiz], y_hats[0], y_hats[-1], color='green', alpha=0.3)
+    else:
+        y_hats = [None] + y_hats + [None]
+        
+    ax.axvline(dtime[margin], c='k', lw=0.5)
+    for i in range(1,len(y_hats)-1):
+        ax.plot(dtime[margin: margin+horiz], y_hats[i], color='green')
+        
+    ax.legend(['target']+labels)
+
+def plot_eval_test(ax, 
+                   title: str,
+                   labels: tuple[str,str],
+                   eval_freq: int, 
+                   logs_eval: list[dict[str, float]], 
+                   logs_test: list[dict[str, float]], 
+                   start_ix=0, 
+                   is_standardized=False):
+    y_eval = np.array([x['mae'] for x in logs_eval[start_ix:]])
+    y_test = np.array([x['mae'] for x in logs_test[start_ix:]])
+    
+    if is_standardized:
+        y_eval = (y_eval - y_eval.mean()) / y_eval.std()
+        y_test = (y_test - y_test.mean()) / y_test.std()
+    
+    p1 = ax.plot(y_eval, c='k', alpha=0.5)
+    p2 = ax.plot(y_test, c='g', alpha=0.5)
+    ax.set_title(title)
+    
+    ticks = np.arange(start_ix, len(logs_eval))
+    ax.set_xticks(ticks[::50])
+    ax.set_xticklabels(ticks[::50] * eval_freq)
+    ax.legend([p1, p2], labels, handler_map={list: HandlerTuple(ndivide=1)})
+
+def load_models_v2(path: str) -> tuple[pd.DataFrame, list[lgb.Booster]]:
+    """
+    Reads cv_res_df.csv and lightgbm models from
+    specified directory. The directory has to contain
+    exactly one .csv file.
+    """
+    csv_path = glob(f'{path}/*.csv')
+    if len(csv_path)!=1:
+        raise ValueError(f'Expected single .csv in target directory, got {csv_path}')
+    
+    cv_res_df = pd.read_csv(csv_path[0], index_col=0)
+    models = []
+    for i,path in enumerate(sorted(glob(f'{path}/*.txt'), 
+                               key=lambda s: int(s[-6:-4]))):
+        models.append(lgb.Booster(model_file=path))
+        models[-1].params['base_model'] = eval(cv_res_df.iloc[i].params)['base_model']
+    return cv_res_df, models
+
+
 def load_models(timestamp: str, 
                 output_path: str,
                 sort_by: tuple[str,str], 

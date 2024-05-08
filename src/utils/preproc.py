@@ -5,76 +5,6 @@ from itertools import product
 from tsfresh import extract_features
 from tsfresh.utilities.dataframe_functions import roll_time_series
 
-
-def process(path: str) -> pd.DataFrame:
-    """Preprocessing of eneregy dataset
-    Fixed procedure, no parameters
-    """
-    new_names = ['date', 
-             'price_zone', 
-             'free_transfer_zone', 
-             'hour', 
-             'hydro_plan',
-             'nuclear_plan', 
-             'thermal_plan', 
-             'thermal_min', 
-             'thermal_max',
-             'consumption', 
-             'export',
-             'import',
-             'solar_plan',
-             'wind_plan',
-             'renewable_plan',
-             'supply_1',
-             'supply_2',
-             'price',
-            ]
-    
-    # haven't figured out how to rename *multilevel* columns in a functional way
-    def rename(df):
-        df.columns = [f'{col[1]}_{col[0]}' for col in df.columns]
-        return df
-    
-    # zero variance threshold
-    variance_eps = 1e-6
-    
-    df = ( pd
-      .read_csv(path)
-      
-       # rename columns for better access/readability
-      .pipe(lambda df: df.rename(columns = dict(zip(df.columns, new_names))))
-       
-       # casting/shrinking
-      .astype({'date': 'datetime64[ns]',
-               'free_transfer_zone': 'category',
-               'hour': 'int8'})
-      .pipe(lambda df: df.astype({ col: 'float32' 
-                                  for col in df.select_dtypes('float64').columns }))
-      
-      # drop zero-variance features
-      .drop(columns = ['price_zone',
-                       'renewable_plan'])
-      
-      # removing trailing spaces
-      .pipe(lambda df: df.assign(free_transfer_zone =
-              df.free_transfer_zone.cat.rename_categories(lambda s: s.strip())))
-      
-      # combining hours and dates into a single feature
-      .pipe(lambda df: df.assign( dtime = df['date'] + pd.to_timedelta(df.hour, unit='hour')))
-      
-      .drop(columns = ['date', 'hour'])
-            
-      .pivot(index='dtime', columns='free_transfer_zone')
-      .sort_index()
-            
-      .pipe(lambda df: df.drop(columns = df.columns[df.std(axis=0)<variance_eps]))
-        
-      .pipe(rename)
-      #.pipe(lambda df: df.columns = [f'{col[1]}_{col[0]}' for col in df.columns])  
-    )
-    return df
-
-
 def add_features(df: pd.DataFrame, **kw) -> pd.DataFrame:
     """Adds to the dataframe basic aggregate features, specified in kwargs
     
@@ -144,8 +74,22 @@ def add_features(df: pd.DataFrame, **kw) -> pd.DataFrame:
     
     return df
 
-def tsfresh_extract(df: pd.DataFrame, window: int, column: str) -> pd.DataFrame:
+def tsfresh_extract(df: pd.DataFrame, 
+                    window: int, 
+                    column: str,
+                    show_warnings=False) -> pd.DataFrame:
     """Extracts tsfresh features, based on the column `column` and window size `window`
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Source dataframe
+    window : int
+        Window size to aggregate over
+    column : str
+        Column to extract features from
+    show_warnings : bool (default False)
+        Whether tsfresh should display warnings
     """
     df_tmp = ( df
               .loc[:, [column]]
@@ -157,7 +101,7 @@ def tsfresh_extract(df: pd.DataFrame, window: int, column: str) -> pd.DataFrame:
                               rolling_direction=1, 
                               max_timeshift=window-1, 
                               min_timeshift=window-1,
-                              show_warnings=True,
+                              show_warnings=show_warnings,
                               n_jobs=4)
     feats = extract_features(rolled.drop(columns=['dummy_id']),
                              column_id="id", 
